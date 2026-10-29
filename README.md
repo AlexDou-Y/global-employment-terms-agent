@@ -130,7 +130,7 @@ cp -R ./skills/global-employment-terms "$HOME/.codex/skills/"
 python -m unittest discover -s tests -v
 ```
 
-测试使用模拟 API 响应，不需要密钥、不调用付费服务；通过测试不代表已验证真实联网效果或任何国家的法律结论。GitHub Actions 在 Windows / Ubuntu、Python 3.10 / 3.13 上运行测试。
+测试使用模拟 API 响应，不需要密钥、不调用付费服务；通过测试不代表已验证真实联网效果或任何国家的法律结论。项目提供 [GitHub Actions 测试模板](docs/ci/offline-tests.yml)，覆盖 Windows / Ubuntu、Python 3.10 / 3.13。当前发布凭据未具备创建工作流的权限，因此未启用远端自动运行；仓库维护者可在授权后将模板复制到 `.github/workflows/tests.yml`。
 
 接口与边界见 [设计说明](docs/design.md)，贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)，公开虚构输入见 [examples/input.json](examples/input.json)。
 

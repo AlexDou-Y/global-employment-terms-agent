@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="围绕实际工作地与员工国籍，联网研究海外劳动合同、续签、试用期及解除规则，并保留来源与待确认事项。">
+  <title>海外劳动合同与试用期核验 Agent</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要内容</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="海外用工核验首页">
+      <span class="brand-mark" aria-hidden="true"><span></span></span>
+      <span class="brand-type">海外用工核验<span>GLOBAL EMPLOYMENT RESEARCH</span></span>
+    </a>
+    <nav aria-label="主导航">
+      <a class="nav-link" href="#query-panel">开始核验</a>
+      <button class="nav-link" id="history-toggle" type="button" aria-expanded="false" aria-controls="history-panel">历史报告 <span id="history-count" class="count">0</span></button>
+    </nav>
+  </header>
+
+  <main id="main" class="page-shell">
+    <section class="page-intro" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow"><span class="status-dot"></span> 全球用工 · 有据可查</p>
+        <h1 id="page-title">海外劳动合同<span>与试用期核验</span></h1>
+        <p class="intro-copy">从工作地与员工国籍出发，梳理合同、续签和试用期规则。<br class="desktop-break">保留适用条件、来源依据与待确认事项，为 HR 判断提供研究起点。</p>
+      </div>
+      <div class="intro-note"><span class="intro-note-number">05</span><div>核心核验主题<span>规则 · 适用 · 依据</span></div></div>
+    </section>
+
+    <section id="history-panel" class="history-panel" aria-labelledby="history-title" hidden>
+      <div class="section-heading"><div><p class="eyebrow">LOCAL REPORTS</p><h2 id="history-title">历史报告</h2></div><button id="history-refresh" class="button button-small button-quiet" type="button">刷新列表</button></div>
+      <p class="helper">报告保存在当前本地服务的数据目录中。演示报告始终保留演示标记。</p>
+      <p id="history-error" class="inline-error" role="status" hidden></p>
+      <div id="history-list" class="history-list"><p class="empty-note">正在读取历史报告…</p></div>
+    </section>
+
+    <div class="workspace">
+      <aside id="query-panel" class="query-panel" aria-labelledby="query-title">
+        <form id="research-form">
+          <div class="form-heading"><span class="step-label">01 / 研究场景</span><h2 id="query-title">先确定用工背景</h2><p>实际工作地是规则判断的起点。</p></div>
+          <div class="form-fields">
+            <div class="field"><label for="country">实际工作国家／地区 <span class="required">必填</span></label><input id="country" name="country" type="text" placeholder="例如：新加坡" required maxlength="120" autocomplete="off" list="country-options"><datalist id="country-options"><option value="新加坡"></option><option value="日本"></option><option value="德国"></option><option value="法国"></option><option value="英国"></option><option value="美国"></option><option value="墨西哥"></option><option value="印度尼西亚"></option><option value="马来西亚"></option><option value="泰国"></option><option value="阿联酋"></option></datalist></div>
+            <div class="field"><label for="nationality">员工国籍 <span class="required">必填</span></label><input id="nationality" name="nationality" type="text" placeholder="例如：中国" required maxlength="120" autocomplete="off"><p class="field-help">国籍与工作地可以不同；入境身份可能影响适用条件。</p></div>
+
+            <details class="form-details" id="scenario-details"><summary><span>补充场景信息</span><span class="summary-note">可选</span></summary><div class="details-content">
+              <div class="field"><label for="subdivision">州／省／城市</label><input id="subdivision" name="subdivision" type="text" placeholder="存在地区差异时请补充" maxlength="120" autocomplete="off"></div>
+              <div class="field"><label for="employment-model">用工安排</label><select id="employment-model" name="employment_model"><option value="unspecified">尚未确定</option><option value="direct">当地实体直接雇佣</option><option value="eor">EOR 名义雇主</option><option value="expatriate">跨境外派</option><option value="other">其他安排</option></select></div>
+              <div class="field"><label for="query-mode">本次研究范围</label><select id="query-mode" name="query_mode"><option value="rules">通用规则研究</option><option value="case">具体个案判断</option></select></div>
+              <div class="field"><label for="as-of-date">规则适用日期</label><input id="as-of-date" name="as_of_date" type="date" required><p class="field-help">默认今天；历史日期的规则可能需要额外核实。</p></div>
+              <div class="field"><label for="details">补充事实</label><textarea id="details" name="details" rows="4" maxlength="12000" placeholder="如雇佣主体、合同次数与期限、试用期起止日、岗位及绩效事实。请避免填写姓名、证件号码等非必要信息。"></textarea></div>
+            </div></details>
+
+            <details class="form-details" id="runtime-settings"><summary><span>模型与连接设置</span><span id="connection-badge" class="connection-badge">读取中</span></summary><div class="details-content">
+              <div class="field"><label for="api-key">OpenAI API Key</label><input id="api-key" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" data-lpignore="true" aria-describedby="api-key-help"><p id="api-key-help" class="field-help">密钥仅用于本次请求，不保存到浏览器或报告。</p></div>
+              <div class="field"><label for="model">模型名称</label><input id="model" type="text" placeholder="正在读取默认模型" maxlength="120" autocomplete="off"><p class="field-help">请使用支持 Responses API 联网搜索的模型。</p></div>
+            </div></details>
+            <p id="config-notice" class="config-notice" role="status" hidden></p>
+          </div>
+          <div class="form-actions">
+            <button class="button button-primary" id="research-button" type="submit"><span>联网核验并生成报告</span><span aria-hidden="true">↗</span></button>
+            <button class="button button-secondary" id="demo-button" type="button">查看演示 <span aria-hidden="true">→</span></button>
+            <p class="request-note">联网核验会将填写的信息发送至模型服务商，API 用量由服务商计费。</p>
+          </div>
+        </form>
+        <div class="form-footer"><span class="small-dot" aria-hidden="true"></span>演示无需 API Key，不代表任何国家法律。</div>
+      </aside>
+
+      <section class="result-panel" aria-label="核验结果">
+        <div id="request-status" class="request-status" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="request-status-title">正在联网核验</strong><p id="request-status-message">正在检索来源并整理报告，可能需要数分钟。请保持页面打开。</p><span id="elapsed-time" class="elapsed-time" aria-hidden="true"></span></div></div>
+        <div id="request-error" class="error-banner" role="alert" hidden><strong>本次请求未完成</strong><p id="request-error-text"></p></div>
+
+        <div id="welcome-panel" class="welcome-panel">
+          <div class="welcome-top"><p class="eyebrow">RESEARCH WORKSPACE</p><span class="outline-tag">五个问题，一份研究报告</span></div>
+          <h2>把复杂规则，<br>拆成可核对的判断。</h2>
+          <p class="welcome-copy">不仅看“是否允许”，还需要知道期限如何计算、<br class="desktop-break">适用哪些条件，以及依据来自哪里。</p>
+          <ol class="topic-preview">
+            <li><span class="topic-number">01</span><div><h3>固定期限合同是否允许</h3><p>一般许可、法定理由与受限场景</p></div><span class="topic-arrow" aria-hidden="true">↗</span></li>
+            <li><span class="topic-number">02</span><div><h3>合同期限如何限制</h3><p>单次期限、累计期限与例外</p></div><span class="topic-arrow" aria-hidden="true">↗</span></li>
+            <li><span class="topic-number">03</span><div><h3>续签与无固定期限转化</h3><p>续签次数、转化条件与触发方式</p></div><span class="topic-arrow" aria-hidden="true">↗</span></li>
+            <li><span class="topic-number">04</span><div><h3>试用期如何约定</h3><p>期限上限、延期与暂停的区别</p></div><span class="topic-arrow" aria-hidden="true">↗</span></li>
+            <li><span class="topic-number">05</span><div><h3>试用期绩效不符如何处理</h3><p>解除依据、程序、通知与支付义务</p></div><span class="topic-arrow" aria-hidden="true">↗</span></li>
+          </ol>
+          <div class="welcome-bottom"><span class="mini-label">如何使用</span><p>填写左侧场景开始核验，或先查看虚构地区演示，了解报告结构。</p></div>
+        </div>
+        <div id="report-panel" hidden></div>
+      </section>
+    </div>
+    <footer class="page-footer"><span>海外劳动合同与试用期核验 Agent</span><p>AI 研究辅助。法律要求、供应商政策与个案适用需要分别判断；重大用工决定请由当地专业顾问复核。</p></footer>
+  </main>
+</body>
+</html>

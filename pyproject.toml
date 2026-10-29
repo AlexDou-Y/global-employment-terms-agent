@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "global-employment-terms-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local web research assistant for overseas employment contract terms and probation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [{name = "Alex Dou"}]
-dependencies = []
+dependencies = ["pypdf>=6.14.2,<7"]
 
 [project.scripts]
 global-employment-terms-agent = "employment_agent.server:main"

@@ -4,13 +4,13 @@
 
 提供两种用法：**本地网页**，或复制到具备联网能力的 AI 助手使用的 **[Agent 指令](prompts/agent-instructions.md) / [Skill](skills/global-employment-terms/SKILL.md)**。不依赖企业内部资料。
 
-Local-first HR research assistant for employment terms and probation. Chinese reports, live web research through your locally authenticated Codex CLI, optional direct OpenAI API mode, fictional offline demo, and reusable agent instructions. Python 3.10+, no third-party Python runtime dependencies.
+Local-first HR research assistant for employment terms and probation. Chinese reports, live web research through your locally authenticated Codex CLI, optional direct OpenAI API mode, fictional offline demo, and reusable agent instructions. Python 3.10+, with pypdf for PDF text extraction.
 
-**v0.2 默认使用本机 Codex，无需在网页填写 API Key。** 程序复用本机 Codex CLI 的已有认证；仍需可用的模型服务、联网能力和账户权限，用量与费用遵循现有 Codex 认证方式。当前版本为初期研究工具，本机 Codex、直连 API 和离线演示的验证范围分别见 [验证记录](docs/validation.md)，不能将某一模式的测试结果视为其他模式或国别法律结论已验证。
+**v0.2.1 默认使用本机 Codex，无需在网页填写 API Key，并支持公开 PDF 的按页读取与关键词定位。** 程序复用本机 Codex CLI 的已有认证；仍需可用的模型服务、联网能力和账户权限，用量与费用遵循现有 Codex 认证方式。当前版本为初期研究工具，本机 Codex、直连 API 和离线演示的验证范围分别见 [验证记录](docs/validation.md)，不能将某一模式的测试结果视为其他模式或国别法律结论已验证。
 
 [下载 ZIP](https://github.com/AlexDou-Y/global-employment-terms-agent/archive/refs/heads/main.zip) · [查看虚构报告样例](examples/demo-report.md) · [复制 Agent 指令](prompts/agent-instructions.md)
 
-已通过 121 项离线测试，并通过本机 Codex 实测完成新加坡场景的五问报告。证据不完整的事项仍保留限制，不作为法律签批。
+离线测试和真实联网研究的结果见 [验证记录](docs/validation.md)。报告按五个主题组织，证据不完整的事项保留限制，不保证获得每个国家的全部适用规则，也不作为法律签批。
 
 ![本机 Codex 模式，无需在网页填写密钥](docs/images/codex-mode.png)
 
@@ -36,6 +36,7 @@ Local-first HR research assistant for employment terms and probation. Chinese re
 git clone https://github.com/AlexDou-Y/global-employment-terms-agent.git
 Set-Location global-employment-terms-agent
 python --version
+python -m pip install -e .
 python -m employment_agent
 ```
 
@@ -45,6 +46,7 @@ python -m employment_agent
 git clone https://github.com/AlexDou-Y/global-employment-terms-agent.git
 cd global-employment-terms-agent
 python3 --version
+python3 -m pip install -e .
 python3 -m employment_agent
 ```
 
@@ -64,7 +66,7 @@ python -m employment_agent --port 8766 --data-dir ../global-employment-terms-dat
 
 macOS/Linux 将上述 `python` 换成 `python3`。自定义数据目录应位于仓库外，或自行加入 `.gitignore`。本项目面向单用户本地运行，不提供公网部署方案。
 
-可选：在虚拟环境中运行 `python -m pip install -e .`，之后也可用 `global-employment-terms-agent` 启动。直接从项目根目录启动无需安装依赖。
+启动和测试前须执行上述安装命令，安装项目及必需的 `pypdf>=6.14.2,<7` 依赖；从项目根目录启动也需要该依赖。建议在虚拟环境中安装，安装后也可用 `global-employment-terms-agent` 启动。依赖安装通常需要网络，完成安装后的虚构演示与离线测试不需要联网。
 
 ## 启用实时研究
 
@@ -83,6 +85,18 @@ codex login
 网页会显示 CLI 是否可用、认证配置状态及相关提示。**检测到认证配置不等于真实调用已成功**；模型权限、搜索能力、网络、余额或额度仍以实际研究调用为准。程序不会代替用户登录，不读取或复制 `auth.json`，也不修改全局 Codex 配置。请勿在聊天、问题反馈或仓库中分享凭据。
 
 模型默认留空，沿用本机 Codex 配置；需要时可在网页或 `CODEX_MODEL` 指定。研究调用使用临时工作目录、只读沙箱和非持久会话，并关闭与网页研究无关的本地工具能力。调用机制参见 [Codex 非交互模式](https://developers.openai.com/codex/noninteractive) 和 [项目设计说明](docs/design.md)。本机模式失败时不会自动切换到直连 API。
+
+单次本机 Codex 查询总上限为 600 秒：先用最多 300 秒研究；如有实际读取证据但研究超时，再用最多 300 秒进行不调用工具的恢复整理。恢复结果会明确标注未完成核查的范围。复杂法规、站点限制或网络异常仍可能导致超时；上限不代表报告一定能在此时间内完成。
+
+### 公开 PDF 读取范围
+
+本机 Codex 的研究工具可读取公开 HTML、文本和不超过 20 MB 的未加密 PDF，并从网页中的链接及 `iframe`、`embed`、`object` 发现嵌入的 PDF 地址。网页上能看到法规标题或下载链接，不代表已取得正文；研究需继续读取 PDF 中的相关条文。
+
+- 默认读取 PDF 前 5 页；指定页码范围时，每次最多读取 12 页，正文输出上限为 28,000 字符。返回页码是从 1 开始的 PDF 实际页序，可能与文件印刷页码不同。
+- 长文档先按关键词定位命中页，再读取这些页并核对上下文。关键词结果只是定位片段，不计为已读正文；未命中也不证明不存在相关规定。
+- PDF 下载支持 HTTP Range 分段读取及响应范围校验，减少大文件传输超时；仍受站点支持、文件大小和网络条件限制。
+- 仅有扫描图像、无法提取文字的 PDF 会提示需要 OCR；当前不自动 OCR。加密、损坏或超出解析限制的文档可能无法读取。
+- 报告列示可确认的已读页码与总页数。选定页内容读取完成不等于全文读取完成，也不代表相关条文已支持报告的每项结论。
 
 ### 可选方式：直连 OpenAI API
 
@@ -121,7 +135,7 @@ cp .env.example .env
 
 实时研究先联网检索并读取来源，再整理成固定结构的报告。本机模式通过 Codex CLI 调用；直连 API 模式通过 Responses API 调用。两种模式均核查真实搜索调用、来源轨迹、五项主题和输入日期等一致性；这些检查帮助发现缺口，**不能替代对法律原文及个案的专业判断**。
 
-- **搜索结果出现 URL ≠ 已打开原文。** `observed_in_search` 表示 URL 出现在工具记录；`opened_by_tool` 表示工具轨迹明确记录了 `open_page`。即使打开过页面，也不证明已完整读取或正确解释相关条款。
+- **发现来源链接 ≠ 已读取内容 ≠ 已取得支持结论的条文。** `observed_in_search` 表示 URL 出现在工具记录；`opened_by_tool` 仅表示工具读取轨迹，在界面中显示为“工具已读取内容”。它不能证明法规详情页包含法律正文，也不证明 PDF 全文已读取或条款解释正确。
 - **最终报告中的链接不能自证核验。** 本机 Codex 模式以本次 CLI JSONL 事件中的真实工具轨迹核对来源；若 CLI 只提供有限搜索记录，程序按可见证据降级或拒绝结果，不把模型正文中的 URL 当作已访问来源。
 - **官方来源标签由 AI 判断。** 程序不独立认证发布者的法律权威、法规现行效力或司法解释。缺少可靠原文、日期不明、来源冲突时应保留“待核验”。
 - **规则明确 ≠ 个案可以执行。** 国籍不能代替实际工作地、雇佣主体、用工模式、合同历史和解除事实。解除、续签及合同变更前，应由当地法务/顾问核实适用依据与程序。
@@ -158,7 +172,7 @@ cp -R ./skills/global-employment-terms "$HOME/.codex/skills/"
 
 **为什么要求补充信息？** 国别规则可能受省州、岗位、集体协议、用工模式、合同期限与历史影响。缺少个案事实时只能给出通用规则或条件判断。
 
-**为什么有“待核验”，或者查询失败？** 可能是未找到官方原文、无法确认已打开相关页面、来源冲突，或 Codex / API 权限、额度、网络、响应格式异常。未知不代表允许，失败也不产生一份假装完成的报告。
+**为什么有“待核验”，或者查询失败？** 可能是未找到支持结论的条文、正文无法读取、来源冲突，或 Codex / API 权限、额度、网络、响应格式异常。扫描 PDF 还可能需要 OCR。未知不代表允许，失败也不产生一份假装完成的报告。
 
 **规则卡可以直接复用为结论吗？** 不可以。它们仅保存通用研究线索；实时查询仍需按本次日期重查。自动积累只适用于 `query_mode=rules` 且 `details` 为空的查询，个案报告和有补充场景的查询不自动积累。
 
@@ -166,9 +180,10 @@ cp -R ./skills/global-employment-terms "$HOME/.codex/skills/"
 
 ## 开发与贡献
 
-运行离线测试：
+先安装项目与依赖，再运行离线测试（macOS / Linux 使用 `python3`）：
 
 ```bash
+python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 

@@ -13,7 +13,7 @@
   };
   const ruleLabels = { supported: "已找到依据", partial: "依据不完整", unverified: "尚未核实", conflict: "依据存在冲突" };
   const applicationLabels = { general_rule: "通用规则", conditional: "有条件适用", meets_conditions: "按已知事实符合条件", does_not_meet: "按已知事实不符合条件", insufficient_info: "个案信息不足", not_applicable: "不适用于本场景" };
-  const sourceLabels = { official: "官方来源", professional: "专业机构", vendor: "供应商", other: "其他来源" };
+  const sourceLabels = { official: "官方（AI 分类）", professional: "专业机构", vendor: "供应商", other: "其他来源" };
   const employmentLabels = { unspecified: "尚未确定", direct: "当地实体直接雇佣", eor: "EOR 名义雇主", expatriate: "跨境外派", other: "其他安排" };
   const queryModeLabels = { rules: "通用规则研究", case: "具体个案判断" };
   const text = (value, fallback = "") => typeof value === "string" ? value : (typeof value === "number" ? String(value) : fallback);
@@ -267,17 +267,23 @@
     heading.append(element("span", "source-id", text(source.id, "S" + (index + 1))), element("span", "source-title", text(source.title, "未命名来源")));
     card.append(heading);
     const meta = element("div", "source-meta");
-    meta.append(element("span", "source-pill", sourceLabels[source.source_type] || "类型未提供"), element("span", "source-pill", source.observed_in_search === true ? "搜索轨迹中出现" : "搜索轨迹未确认"), element("span", "source-pill " + (source.opened_by_tool === true ? "opened" : ""), source.opened_by_tool === true ? "工具已打开原文" : "原文打开未确认"));
+    meta.append(element("span", "source-pill", sourceLabels[source.source_type] || "类型未提供"), element("span", "source-pill", source.observed_in_search === true ? "搜索轨迹中出现" : "搜索轨迹未确认"), element("span", "source-pill " + (source.opened_by_tool === true ? "opened" : ""), source.opened_by_tool === true ? "工具已读取内容" : "正文读取未确认"));
     card.append(meta);
     const body = element("div", "source-body");
     const facts = element("dl");
     [["发布机构", source.publisher], ["具体位置", source.locator], ["生效日期", source.effective_date], ["访问日期", source.accessed_on]].forEach(([label, value]) => {
       facts.append(element("dt", "", label), element("dd", "", text(value, "未提供")));
     });
+    if (source.document_type === "pdf") {
+      const pages = list(source.pages_read).filter((page) => Number.isInteger(page) && page > 0);
+      const total = Number.isInteger(source.total_pages) && source.total_pages > 0 ? String(source.total_pages) : "未知";
+      facts.append(element("dt", "", "PDF 已读页码"), element("dd", "", pages.join("、") || "未记录"), element("dt", "", "PDF 总页数"), element("dd", "", total));
+    }
     body.append(facts);
+    if (source.document_type === "pdf") body.append(element("p", "card-note", "页码仅表示已读取选定页的可提取文本，不代表全文完整读取。"));
     const url = safeUrl(source.url);
     if (url) {
-      const link = element("a", "", "打开来源原文 ↗");
+      const link = element("a", "", "打开来源链接 ↗");
       link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer";
       body.append(link);
     } else body.append(element("p", "card-note", "未提供可打开的 http / https 来源链接。"));
@@ -328,7 +334,7 @@
     if (demo) content.append(element("div", "demo-notice", "虚构地区演示 · 本报告仅用于展示结构，不代表任何国家或地区的现行法律，不可用于实际用工决定。"));
     const header = element("header", "report-header");
     const topline = element("div", "report-topline");
-    topline.append(element("span", "report-kicker", "EMPLOYMENT RESEARCH REPORT"), element("span", "mode-badge" + (demo ? " demo" : ""), demo ? "演示报告" : "联网研究报告"));
+    topline.append(element("span", "report-kicker", "EMPLOYMENT RESEARCH REPORT"), element("span", "mode-badge" + (demo ? " demo" : ""), demo ? "演示报告" : report.research_incomplete === true ? "部分研究 · 恢复整理" : "联网研究报告"));
     header.append(topline, element("h2", "", text(report.jurisdiction, "用工规则研究")), element("p", "report-summary", report.summary));
     const meta = element("div", "report-meta");
     meta.append(element("span", "", "规则日期 " + text(report.as_of_date, "未提供")), element("span", "", "生成于 " + dateLabel(report.generated_at)));
@@ -363,7 +369,7 @@
     const sources = element("section", "content-card");
     const sourceHeading = element("div", "section-heading");
     sourceHeading.append(element("h3", "", "来源与研究记录"), element("span", "count", String(list(report.sources).length)));
-    sources.append(sourceHeading, element("p", "card-note", "“已找到依据”是研究证据状态，不等于法律审核通过。搜索中出现不等于已读取原文；工具打开原文也不代表结论已获专业确认。"));
+    sources.append(sourceHeading, element("p", "card-note", "“已找到依据”是研究证据状态，不等于法律审核通过。发现来源链接不等于已读取内容；已读取内容不等于已取得支持本项结论的条文。搜索摘要不计为已读正文。"));
     const sourceList = element("div", "sources-list");
     list(report.sources).forEach((source, i) => sourceList.append(renderSource(source, i, "report-source-" + i)));
     if (!list(report.sources).length) sourceList.append(element("p", "empty-note", "报告未返回可追溯来源。"));
@@ -406,7 +412,7 @@
         const button = element("button", "history-item"); button.type = "button";
         button.append(element("strong", "", text(report.jurisdiction, "未命名报告")), element("p", "", text(report.summary, "点击查看完整报告")));
         const metadata = element("small", "", dateLabel(report.generated_at));
-        const modeLabel = report.mode === "demo" ? "虚构演示" : Object.hasOwn(providerLabels, report.provider) ? "联网研究 · " + providerLabels[report.provider] : "联网研究";
+        const modeLabel = report.mode === "demo" ? "虚构演示" : report.research_incomplete === true ? "部分研究 · 恢复整理" : Object.hasOwn(providerLabels, report.provider) ? "联网研究 · " + providerLabels[report.provider] : "联网研究";
         metadata.append(element("span", "history-mode" + (report.mode === "demo" ? " demo" : ""), modeLabel));
         button.append(metadata);
         button.addEventListener("click", () => openHistory(report.id));

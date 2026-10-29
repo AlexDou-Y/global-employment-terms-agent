@@ -85,7 +85,7 @@ class ReportStore:
                     if not isinstance(report, dict):
                         continue
                     items.append({"id": path.stem, **{key: report.get(key, "") for key in
-                        ("jurisdiction", "generated_at", "mode", "provider", "summary")}})
+                        ("jurisdiction", "generated_at", "mode", "provider", "summary", "research_incomplete")}})
                 except (OSError, ValueError):
                     continue
         return sorted(items, key=lambda item: item["generated_at"], reverse=True)[:100]

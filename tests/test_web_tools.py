@@ -2,6 +2,7 @@ import io
 import json
 import subprocess
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -160,6 +161,57 @@ class WebToolTests(unittest.TestCase):
                 self.assertIn("error", result)
                 self.assertEqual(result["text"], "")
 
+    def test_embedded_official_pdf_is_discovered_even_without_anchor(self):
+        body = '<p>Official metadata</p><iframe src="/asset/labor law.pdf#toolbar=0&amp;navpanes=0"></iframe><object data="/original.pdf" type="application/pdf"></object>'
+        result = self.read(transport=Transport(page(body)))
+        self.assertIn("https://law.example/asset/labor%20law.pdf", [x["url"] for x in result["links"]])
+        self.assertIn("https://law.example/original.pdf", [x["url"] for x in result["links"]])
+
+    def test_pdf_wrapper_without_body_retains_discovery_links(self):
+        result = self.read(transport=Transport(page('<title>Official PDF</title><iframe src="/law.pdf"></iframe>')))
+        self.assertIn("error", result)
+        self.assertEqual(result["text"], "")
+        self.assertIn("https://law.example/law.pdf", [x["url"] for x in result["links"]])
+
+    def test_pdf_larger_than_old_html_limit_reaches_extractor(self):
+        body = b'%PDF-1.7\n' + b' ' * (3 * 1024 * 1024)
+        extracted = {"text": "[PDF page 3]\nPasal 8 actual text", "content_type": "pdf", "pages": [{"page": 3, "text": "Pasal 8 actual text"}], "selected_pages": [3], "total_pages": 50, "truncated": False, "full_document": False, "search_mode": False}
+        with patch.object(web, "_extract_pdf", return_value=extracted) as extract:
+            result = web.read_web_page("https://law.example/act.pdf", page_start=3, page_end=3,
+                                       transport=Transport(page(body, "application/pdf")), resolver=public_resolver)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["document_type"], "pdf")
+        self.assertEqual(result["pages_read"], [3])
+        self.assertEqual(result["total_pages"], 50)
+        self.assertFalse(result["full_document"])
+        self.assertEqual(extract.call_args.kwargs["page_start"], 3)
+
+    def test_pdf_search_dispatch_preserves_snippet_limitation(self):
+        payload = {"text": "[page 9] ... Pasal 58 ...", "search_mode": True, "truncated": True,
+                   "selected_pages": [], "total_pages": 50, "matched_pages": [9], "full_document": False}
+        request = {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "read_web_page", "arguments": {"url": "https://law.example/law.pdf", "search": "Pasal 58"}}}
+        with patch.object(web, "_extract_pdf", return_value=payload):
+            result = web.handle_request(request, transport=Transport(page(b"%PDF-1.7", "application/pdf")), resolver=public_resolver)["result"]
+        self.assertFalse(result["isError"])
+        self.assertTrue(result["structuredContent"]["truncated"])
+        self.assertEqual(result["structuredContent"]["pages_read"], [])
+
+    def test_pdf_extractor_timeout_returns_actionable_error(self):
+        with patch("employment_agent.web_tools.subprocess.run", side_effect=subprocess.TimeoutExpired("parser", 25)):
+            result = self.read(transport=Transport(page(b"%PDF-1.7", "application/pdf")))
+        self.assertIn("PDF", result["error"])
+        self.assertEqual(result["text"], "")
+
+    def test_default_pdf_download_path_invokes_bounded_range_fetch(self):
+        expected = ("https://law.example/live.pdf", {"content-type": "application/pdf"}, b"%PDF-test")
+        def downloader(url, callback, **kwargs):
+            self.assertEqual(kwargs["workers"], 4)
+            self.assertEqual(kwargs["chunk_size"], 128 * 1024)
+            return callback(url, 0, 65535)
+        with patch("employment_agent.pdf_download.download_pdf", side_effect=downloader), patch.object(web, "_fetch", return_value=expected) as fetch:
+            self.assertEqual(web._download_pdf(expected[0]), expected)
+        self.assertEqual(fetch.call_args.kwargs["extra_headers"], {"Range": "bytes=0-65535"})
+
     def test_response_byte_limits_are_enforced_with_injected_transport(self):
         self.assertIn("error", self.read(transport=Transport(page(b"x" * (2 * 1024 * 1024 + 1), "text/plain"))))
         self.assertIn("error", self.search(transport=Transport(page(b"x" * (1024 * 1024 + 1), "text/xml"))))
@@ -264,6 +316,103 @@ class WebToolTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[0]["result"], {})
         self.assertEqual(lines[1]["error"]["code"], -32700)
+
+    def test_stdio_slow_read_does_not_block_ping_or_search(self):
+        started, release = threading.Event(), threading.Event()
+        output_ready = threading.Condition()
+
+        class Output(io.StringIO):
+            def write(self, value):
+                with output_ready:
+                    written = super().write(value)
+                    output_ready.notify_all()
+                    return written
+
+        output = Output()
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_web_page", "arguments": {"url": "https://law.example/large.pdf"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "search_web", "arguments": {"query": "law"}}},
+        ]
+
+        def slow_read(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            return {"kind": "page", "text": "Selected PDF page"}
+
+        def response_ids():
+            return [json.loads(line)["id"] for line in output.getvalue().splitlines()]
+
+        with patch.object(web, "read_web_page", side_effect=slow_read), patch.object(web, "search_web", return_value={"kind": "search", "results": []}):
+            server = threading.Thread(target=web.serve, args=(io.StringIO("\n".join(map(json.dumps, requests)) + "\n"), output), daemon=True)
+            server.start()
+            try:
+                self.assertTrue(started.wait(2))
+                with output_ready:
+                    fast_finished = output_ready.wait_for(lambda: {2, 3}.issubset(response_ids()), timeout=2)
+                    self.assertTrue(fast_finished, "Ping and search waited for the blocked PDF read")
+                    self.assertNotIn(1, response_ids())
+            finally:
+                release.set()
+                server.join(5)
+        self.assertFalse(server.is_alive())
+        self.assertCountEqual(response_ids(), [1, 2, 3])
+
+    def test_stdio_tool_workers_and_pending_requests_are_bounded(self):
+        release, three_running = threading.Event(), threading.Event()
+        output_ready, active_lock = threading.Condition(), threading.Lock()
+        active = peak = called = 0
+
+        class Output(io.StringIO):
+            def write(self, value):
+                with output_ready:
+                    written = super().write(value)
+                    output_ready.notify_all()
+                    return written
+
+        output = Output()
+        requests = [{"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {"name": "read_web_page", "arguments": {"url": "https://law.example/large.pdf"}}} for index in range(1, 10)]
+        requests.append({"jsonrpc": "2.0", "id": 10, "method": "ping"})
+
+        def slow_read(*args, **kwargs):
+            nonlocal active, peak, called
+            with active_lock:
+                active += 1
+                called += 1
+                peak = max(peak, active)
+                if active == 3:
+                    three_running.set()
+            release.wait(5)
+            with active_lock:
+                active -= 1
+            return {"kind": "page", "text": "Selected PDF page"}
+
+        def responses():
+            return {item["id"]: item for item in map(json.loads, output.getvalue().splitlines())}
+
+        with patch.object(web, "read_web_page", side_effect=slow_read):
+            server = threading.Thread(target=web.serve, args=(io.StringIO("\n".join(map(json.dumps, requests)) + "\n"), output), daemon=True)
+            server.start()
+            try:
+                self.assertTrue(three_running.wait(2), "Tool requests did not run concurrently")
+                with output_ready:
+                    self.assertTrue(output_ready.wait_for(lambda: {9, 10}.issubset(responses()), timeout=2))
+                    self.assertEqual(responses()[9]["error"]["code"], -32000)
+            finally:
+                release.set()
+                server.join(5)
+        self.assertFalse(server.is_alive())
+        self.assertEqual(peak, 3)
+        self.assertEqual(called, 8)
+        self.assertCountEqual(responses(), range(1, 11))
+        self.assertEqual(len(output.getvalue().splitlines()), 10)
+
+    def test_stdio_closed_output_does_not_raise_or_disclose_errors(self):
+        output = Mock()
+        output.write.side_effect = BrokenPipeError("private pipe details")
+        request = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        web.serve(io.StringIO(json.dumps(request) + "\n"), output)
+        self.assertEqual(output.write.call_count, 1)
 
 
 if __name__ == "__main__":

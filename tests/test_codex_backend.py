@@ -70,6 +70,20 @@ class FixtureRunner:
             "\n".join(json.dumps(event) for event in self.events), "private sk-fixture-secret")
 
 
+class TimeoutRecoveryRunner(FixtureRunner):
+    def __init__(self, events=None, captured=None, **kwargs):
+        super().__init__(events=[{"type": "turn.started"}, {"type": "turn.completed"}], **kwargs)
+        self.captured = captured if captured is not None else "\n".join(
+            json.dumps(event) for event in (mcp_events_fixture()[:-1] if events is None else events))
+
+    def __call__(self, command, *, input, cwd, timeout):
+        if command[-3:] == ["mcp", "list", "--json"] or self.calls:
+            return super().__call__(command, input=input, cwd=cwd, timeout=timeout)
+        self.calls.append({"command": command, "input": input, "cwd": cwd, "timeout": timeout})
+        raise subprocess.TimeoutExpired(command, timeout, output=self.captured.encode("utf-8"),
+                                        stderr=b"private sk-timeout-secret")
+
+
 class CodexBackendTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(backend, "Codex backend is not implemented")
@@ -90,6 +104,8 @@ class CodexBackendTests(unittest.TestCase):
         self.assertEqual(result["model"], "本机 Codex 默认模型")
         self.assertEqual(result["findings"][0]["rule_status"], "supported")
         self.assertTrue(result["sources"][0]["opened_by_tool"])
+        self.assertNotIn("research_incomplete", result)
+        self.assertEqual(len(runner.calls), 1)
         self.assertNotIn("--model", runner.calls[0]["command"])
         self.assertNotIn("private", json.dumps(result))
         self.assertFalse(Path(runner.calls[0]["cwd"]).exists())
@@ -129,6 +145,330 @@ class CodexBackendTests(unittest.TestCase):
         self.assertIn("不使用模型记忆补充数字", prompt)
         self.assertIn("不要读取本地规则", prompt)
         self.assertEqual(runner.calls[0]["timeout"], 300)
+
+    def test_timeout_recovers_only_completed_owned_evidence_and_keeps_pdf_pages(self):
+        events = mcp_events_fixture()[:-1]
+        events[2]["item"]["result"]["structured_content"].update(
+            document_type="pdf", text_extraction="pdf_text", pages_read=[7, 8],
+            total_pages=50, full_document=False)
+        events.append({"type": "item.completed", "item": {"type": "agent_message",
+            "text": "assistant-private-cannot-be-evidence"}})
+        raw = "\n".join(json.dumps(event) for event in events) + '\n{"type":"item.completed","item":'
+        result, runner = self.run_fixture(runner=TimeoutRecoveryRunner(captured=raw))
+        self.assertEqual(result["provider"], "codex")
+        self.assertEqual(result["mode"], "live")
+        self.assertTrue(result["research_incomplete"])
+        self.assertEqual(result["recovery_reason"], "research_timeout")
+        note = "研究达到时间上限，以下依据中断前已实际读取材料整理；未完成核查项保留待确认"
+        self.assertIn(note, result["summary"])
+        self.assertIn(note, result["verification_notes"])
+        self.assertEqual(result["sources"][0]["pages_read"], [7, 8])
+        self.assertEqual(result["sources"][0]["total_pages"], 50)
+        self.assertFalse(result["sources"][0]["full_document"])
+        self.assertEqual(len(result["findings"]), 5)
+        self.assertNotIn("assistant-private", runner.calls[1]["input"])
+        self.assertNotIn("sk-timeout", runner.calls[1]["input"])
+        self.assertIn("Fictional law text", runner.calls[1]["input"])
+        self.assertNotEqual(runner.calls[0]["command"][runner.calls[0]["command"].index("--output-last-message")+1],
+                            runner.calls[1]["command"][runner.calls[1]["command"].index("--output-last-message")+1])
+
+    def test_timeout_synthesis_disables_all_tools_and_preserves_model_auth(self):
+        details = "private-user-facts"
+        result, runner = self.run_fixture(query={**QUERY, "details": details}, model="custom:model-1.0",
+            runner=TimeoutRecoveryRunner(mcp=[{"name": "user_tool"}]))
+        command = runner.calls[1]["command"]
+        self.assertNotIn("--search", command)
+        self.assertIn('web_search="disabled"', command)
+        self.assertIn("mcp_servers.user_tool.enabled=false", command)
+        self.assertFalse(any(value.startswith(f"mcp_servers.{INTERNAL_SERVER}.") for value in command))
+        self.assertFalse(any(".enabled=true" in value or ".enabled_tools=" in value for value in command))
+        for feature in backend.DISABLED_FEATURES:
+            self.assertTrue(any(command[i:i+2] == ["--disable", feature] for i in range(len(command)-1)))
+        self.assertEqual(command[command.index("--model")+1], "custom:model-1.0")
+        self.assertNotIn("--ignore-user-config", command)
+        self.assertNotIn(details, " ".join(command))
+        self.assertIn(details, runner.calls[1]["input"])
+        self.assertFalse(any(value.startswith("model_provider=") for value in command))
+        self.assertLessEqual(runner.calls[1]["timeout"], 300)
+        self.assertNotIn("private sk-", json.dumps(result))
+
+    def test_recovery_synthesis_uses_low_effort_and_compact_output_only(self):
+        _, runner = self.run_fixture(runner=TimeoutRecoveryRunner())
+        self.assertIn('model_reasoning_effort="medium"', runner.calls[0]["command"])
+        self.assertIn('model_reasoning_effort="low"', runner.calls[1]["command"])
+        self.assertNotIn('model_reasoning_effort="medium"', runner.calls[1]["command"])
+        prompt = runner.calls[1]["input"]
+        for guidance in ("rule_summary 不超过150个汉字", "摘录不超过200字符", "各不超过4条", "不得删除关键例外"):
+            self.assertIn(guidance, prompt)
+        self.assertEqual(runner.calls[0]["timeout"], 300)
+        self.assertEqual(runner.calls[1]["timeout"], 300)
+        self.assertEqual(backend.RUN_TIMEOUT_SECONDS, 600)
+
+    def test_partial_ledger_only_ignores_incomplete_last_line(self):
+        events = mcp_events_fixture()[:-1]
+        raw = "\n".join(json.dumps(event) for event in events) + '\n{"unfinished":'
+        ledger, count = backend._source_ledger(raw, INTERNAL_SERVER, allow_partial=True)
+        self.assertEqual(count, 1)
+        self.assertTrue(ledger[0]["opened_by_tool"])
+        with self.assertRaises((ValueError, ResearchError)):
+            backend._source_ledger(raw, INTERNAL_SERVER)
+        with self.assertRaises((ValueError, ResearchError)):
+            backend._source_ledger(raw + '\n{"type":"turn.completed"}', INTERNAL_SERVER, allow_partial=True)
+        with self.assertRaises((ValueError, ResearchError)):
+            backend._source_ledger(raw.rsplit("\n", 1)[0] + '\n{"invalid":broken}', INTERNAL_SERVER, allow_partial=True)
+
+    def test_recovery_pack_prefers_pdf_pages_and_marks_size_truncation(self):
+        events = mcp_events_fixture()[:-1]
+        events[2]["item"]["result"]["structured_content"]["text"] = "HTML metadata " * 500
+        events.append(mcp_event("read_web_page", {"kind": "page", "url": OFFICIAL_URL + ".pdf",
+            "title": "Actual PDF clauses", "text": "正文条款 " * 800, "truncated": False,
+            "document_type": "pdf", "pages_read": [7, 8], "total_pages": 50, "full_document": False}, id="pdf-read"))
+        raw = "\n".join(json.dumps(event) for event in events)
+        ledger, _ = backend._source_ledger(raw, INTERNAL_SERVER, allow_partial=True)
+        with patch("employment_agent.codex_backend.MAX_EVIDENCE_PACK_BYTES", 5000):
+            pack = backend._recovery_evidence(raw, INTERNAL_SERVER, ledger)
+        self.assertLessEqual(len(json.dumps(pack, ensure_ascii=False).encode("utf-8")), 5000)
+        self.assertEqual(pack["pages"][0]["document_type"], "pdf")
+        self.assertTrue(pack["pages"][0]["truncated"])
+        self.assertTrue(pack["pages"][0]["pack_truncated"])
+        self.assertFalse(pack["pages"][0]["full_document"])
+        self.assertEqual(pack["pages"][0]["pages_read"], [])
+        self.assertEqual(pack["omitted_records"], 1)
+
+    def test_recovery_pack_clipping_downgrades_proof_and_pdf_page_coverage(self):
+        events = mcp_events_fixture()[:-1]
+        data = events[2]["item"]["result"]["structured_content"]
+        data.update(text="Long body " * 5000 + "TAIL CLAUSE NEVER INCLUDED", document_type="pdf",
+                    pages_read=[7, 8], total_pages=50, full_document=False)
+        report = report_fixture()
+        report["sources"][0]["excerpt"] = "TAIL CLAUSE NEVER INCLUDED"
+        with patch("employment_agent.codex_backend.MAX_EVIDENCE_PACK_BYTES", 5000):
+            result, runner = self.run_fixture(runner=TimeoutRecoveryRunner(events=events, report=report))
+        self.assertNotIn("TAIL CLAUSE NEVER INCLUDED", runner.calls[1]["input"])
+        self.assertTrue(result["sources"][0]["observed_in_search"])
+        self.assertFalse(result["sources"][0]["opened_by_tool"])
+        self.assertTrue(result["sources"][0]["content_truncated"])
+        self.assertEqual(result["sources"][0]["pages_read"], [])
+        self.assertFalse(result["sources"][0]["full_document"])
+        self.assertEqual(result["findings"][0]["rule_status"], "partial")
+
+    def test_recovery_pack_omitted_document_is_not_fully_supported(self):
+        events = mcp_events_fixture()[:-1]
+        data = events[2]["item"]["result"]["structured_content"]
+        events.insert(2, mcp_event("read_web_page", {**data, "url": OFFICIAL_URL + ".pdf",
+            "requested_url": OFFICIAL_URL + ".pdf", "text": "Priority PDF " * 5000,
+            "document_type": "pdf", "pages_read": [1], "total_pages": 1}, id="first-pdf"))
+        with patch("employment_agent.codex_backend.MAX_EVIDENCE_PACK_BYTES", 5000):
+            result, _ = self.run_fixture(runner=TimeoutRecoveryRunner(events=events))
+        self.assertTrue(result["sources"][0]["observed_in_search"])
+        self.assertFalse(result["sources"][0]["opened_by_tool"])
+        self.assertTrue(result["sources"][0]["content_truncated"])
+        self.assertEqual(result["findings"][0]["rule_status"], "partial")
+
+    def test_recovery_keeps_only_fully_included_pages_when_same_pdf_is_clipped(self):
+        events = mcp_events_fixture()[:-1]
+        data = events[2]["item"]["result"]["structured_content"]
+        data.update(document_type="pdf", pages_read=[7], total_pages=50)
+        events.append(mcp_event("read_web_page", {**data, "text": "Other page " * 5000,
+            "pages_read": [8]}, id="clipped-page"))
+        with patch("employment_agent.codex_backend.MAX_EVIDENCE_PACK_BYTES", 5000):
+            result, _ = self.run_fixture(runner=TimeoutRecoveryRunner(events=events))
+        self.assertEqual(result["sources"][0]["pages_read"], [7])
+        self.assertFalse(result["sources"][0]["opened_by_tool"])
+        self.assertTrue(result["sources"][0]["content_truncated"])
+        self.assertEqual(result["findings"][0]["rule_status"], "partial")
+
+    def test_recovery_pack_deduplicates_identical_pages_but_keeps_distinct_content(self):
+        events = mcp_events_fixture()[:-1]
+        data = events[2]["item"]["result"]["structured_content"]
+        data.update(document_type="pdf", pages_read=[24, 25], total_pages=50)
+        events.extend([
+            mcp_event("read_web_page", dict(data), id="repeated-read"),
+            mcp_event("read_web_page", {**data, "pages_read": [26]}, id="different-pages"),
+            mcp_event("read_web_page", {**data, "text": "Different actual clauses"}, id="different-text"),
+        ])
+        raw = "\n".join(json.dumps(event) for event in events)
+        ledger, _ = backend._source_ledger(raw, INTERNAL_SERVER, allow_partial=True)
+        pack = backend._recovery_evidence(raw, INTERNAL_SERVER, ledger)
+        self.assertEqual(len(pack["pages"]), 3)
+        self.assertEqual(sum(page["text"] == data["text"] and page["pages_read"] == [24, 25]
+                             for page in pack["pages"]), 1)
+        self.assertEqual(pack["omitted_records"], 0)
+
+    def test_recovery_pack_omits_navigation_links_but_ledger_preserves_discovery(self):
+        events = mcp_events_fixture()[:-1]
+        navigation_url = "https://labor.example.test/navigation-only"
+        events[2]["item"]["result"]["structured_content"]["links"] = [{"url": navigation_url, "title": "Navigation"}]
+        raw = "\n".join(json.dumps(event) for event in events)
+        ledger, _ = backend._source_ledger(raw, INTERNAL_SERVER, allow_partial=True)
+        pack = backend._recovery_evidence(raw, INTERNAL_SERVER, ledger)
+        self.assertIn(navigation_url, {entry["url"] for entry in ledger})
+        self.assertNotIn(navigation_url, {entry["url"] for entry in pack["observed_sources"]})
+        self.assertIn(OFFICIAL_URL, {entry["url"] for entry in pack["observed_sources"]})
+        report = report_fixture(); report["sources"][0]["url"] = navigation_url
+        with self.assertRaises(ResearchError):
+            self.run_fixture(runner=TimeoutRecoveryRunner(events=events, report=report))
+
+    def test_recovery_pack_drops_search_snippets_only_when_same_document_has_full_read(self):
+        events = mcp_events_fixture()[:-1]
+        data = events[2]["item"]["result"]["structured_content"]
+        data.update(document_type="pdf", pages_read=[24, 25], total_pages=50)
+        events.extend([
+            mcp_event("read_web_page", {**data, "text": "Redundant discovery snippet", "search_mode": True,
+                "truncated": True, "pages_read": [], "matched_pages": [24]}, id="redundant-snippet"),
+            mcp_event("read_web_page", {**data, "url": OFFICIAL_URL + ".other", "requested_url": OFFICIAL_URL + ".other",
+                "text": "Only discovery snippet", "search_mode": True, "truncated": True,
+                "pages_read": [], "matched_pages": [24]}, id="only-snippet"),
+        ])
+        raw = "\n".join(json.dumps(event) for event in events)
+        ledger, _ = backend._source_ledger(raw, INTERNAL_SERVER, allow_partial=True)
+        pack = backend._recovery_evidence(raw, INTERNAL_SERVER, ledger)
+        self.assertEqual(len(pack["pages"]), 2)
+        self.assertNotIn("Redundant discovery snippet", json.dumps(pack))
+        self.assertEqual(pack["pages"][0]["text"], data["text"])
+        self.assertEqual(pack["pages"][0]["pages_read"], [24, 25])
+        self.assertIn("Only discovery snippet", json.dumps(pack))
+
+    def test_recovery_accepts_only_pure_error_notices_before_turn_starts(self):
+        notice = {"type": "item.completed", "item": {"id": "warning", "type": "error",
+            "message": "Ignored unrecognized setting: private-setting"}}
+        runner = TimeoutRecoveryRunner()
+        runner.events.insert(0, notice)
+        result, _ = self.run_fixture(runner=runner)
+        self.assertTrue(result["research_incomplete"])
+        self.assertNotIn("private-setting", json.dumps(result))
+        for event, position in ((notice, 1),
+                                ({"type": "error", "message": "private-failure"}, 0),
+                                ({"type": "turn.failed", "error": {"message": "private-failure"}}, 0),
+                                ({"type": "item.completed", "item": {**notice["item"], "tool": "web_search"}}, 0)):
+            runner = TimeoutRecoveryRunner()
+            runner.events.insert(position, event)
+            with self.subTest(event=event, position=position), self.assertRaises(ResearchError):
+                self.run_fixture(runner=runner)
+
+    def test_recovery_only_exposes_sanitized_tool_error_context(self):
+        events = mcp_events_fixture()[:-1]
+        events.append(mcp_event("read_web_page", {"kind": "page", "url": "https://labor.example.test/failed",
+            "error": "HTTP 403 private sk-raw-secret C:/private/config.json"}, id="failed-read"))
+        result, runner = self.run_fixture(runner=TimeoutRecoveryRunner(events=events))
+        prompt = runner.calls[1]["input"]
+        self.assertIn('"http_status": 403', prompt)
+        self.assertIn('"status": "failed"', prompt)
+        self.assertNotIn("sk-raw-secret", prompt)
+        self.assertNotIn("C:/private", prompt)
+        self.assertNotIn("sk-raw-secret", json.dumps(result))
+
+    def test_recovery_rejects_synthesis_tool_activity(self):
+        for kind in ("item.started", "item.completed"):
+            runner = TimeoutRecoveryRunner()
+            runner.events.insert(1, {"type": kind, "item": {"type": "web_search", "action": {"type": "search"}}})
+            with self.subTest(kind=kind), self.assertRaises(ResearchError):
+                self.run_fixture(runner=runner)
+
+    def test_recovery_exhausted_budget_does_not_start_synthesis(self):
+        runner = TimeoutRecoveryRunner()
+        clock = [100.0]
+        def timed(command, **kwargs):
+            if command[-3:] != ["mcp", "list", "--json"]:
+                clock[0] += 601
+            return runner(command, **kwargs)
+        with patch("employment_agent.codex_backend.time.monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(ResearchError):
+                self.run_fixture(runner=timed)
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_timeout_inventory_cannot_trigger_recovery_or_leak_capture(self):
+        raw = "\n".join(json.dumps(event) for event in mcp_events_fixture())
+        def fail(command, **kwargs):
+            raise subprocess.TimeoutExpired("private sk-command", 5, output=raw, stderr="private sk-error")
+        with self.assertRaises(ResearchError) as caught:
+            self.run_fixture(runner=fail)
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_timeout_without_successful_owned_read_does_not_recover(self):
+        for events in (mcp_events_fixture()[:2], events_fixture(),
+                       mcp_events_fixture(truncated=True)[:-1], [mcp_events_fixture()[2]]):
+            runner = TimeoutRecoveryRunner(events=events)
+            with self.subTest(events=events), self.assertRaises(ResearchError):
+                self.run_fixture(runner=runner)
+            self.assertEqual(len(runner.calls), 1)
+
+    def test_unfinished_read_is_not_recovered(self):
+        events = mcp_events_fixture()[:-1]
+        events[2]["type"] = "item.started"
+        runner = TimeoutRecoveryRunner(events=events)
+        with self.assertRaises(ResearchError):
+            self.run_fixture(runner=runner)
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_recovery_unknown_source_url_is_rejected(self):
+        report = report_fixture()
+        report["sources"][0]["url"] = "https://invented.example.test/new-law"
+        with self.assertRaises(ResearchError):
+            self.run_fixture(runner=TimeoutRecoveryRunner(report=report))
+
+    def test_recovery_schema_and_identity_validation_are_not_bypassed(self):
+        for field, value in (("jurisdiction_country", "Wrong"), ("jurisdiction_subdivision", "Wrong"),
+                             ("as_of_date", "2000-01-01"), ("unexpected", "extra")):
+            report = report_fixture(); report[field] = value
+            with self.subTest(field=field), self.assertRaises(ResearchError):
+                self.run_fixture(runner=TimeoutRecoveryRunner(report=report))
+
+    def test_recovery_second_stage_failure_is_safe(self):
+        for returncode, events in ((1, [{"type": "turn.completed"}]),
+                                  (0, [{"type": "turn.failed", "error": {"message": "sk-private"}}]),
+                                  (0, [{"type": "turn.started"}])):
+            runner = TimeoutRecoveryRunner(returncode=returncode)
+            runner.events = events
+            with self.subTest(returncode=returncode, events=events), self.assertRaises(ResearchError) as caught:
+                self.run_fixture(runner=runner)
+            self.assertNotIn("sk-private", str(caught.exception))
+
+    def test_recovery_second_timeout_cannot_leak_raw_logs(self):
+        runner = TimeoutRecoveryRunner()
+        def second_fails(command, **kwargs):
+            if command[-3:] != ["mcp", "list", "--json"] and runner.calls:
+                raise subprocess.TimeoutExpired("sk-private-command", 300,
+                    output="sk-private-log", stderr="sk-private-error")
+            return runner(command, **kwargs)
+        with self.assertRaises(ResearchError) as caught:
+            self.run_fixture(runner=second_fails)
+        self.assertNotIn("sk-private", str(caught.exception))
+
+    def test_partial_trace_accepts_interrupted_utf8_tail_only(self):
+        raw = "\n".join(json.dumps(event) for event in mcp_events_fixture()[:-1]).encode()
+        raw += b'\n{"type":"item.started","text":"' + "未".encode("utf-8")[:-1]
+        ledger, count = backend._source_ledger(raw, INTERNAL_SERVER, allow_partial=True)
+        self.assertEqual(count, 1)
+        self.assertTrue(ledger[0]["opened_by_tool"])
+
+    def test_partial_trace_rejects_invalid_or_out_of_record_utf8_tail(self):
+        raw = "\n".join(json.dumps(event) for event in mcp_events_fixture()[:-1]).encode()
+        for suffix in (b"\xff", b"\n\xff", "未".encode("utf-8")[:-1], b"\n" + "未".encode("utf-8")[:-1]):
+            with self.subTest(suffix=suffix), self.assertRaises((ValueError, UnicodeError)):
+                backend._source_ledger(raw + suffix, INTERNAL_SERVER, allow_partial=True)
+
+    def test_recovery_total_budget_includes_inventory_and_uses_remaining_time(self):
+        runner = TimeoutRecoveryRunner()
+        clock = [100.0]
+        def timed(command, **kwargs):
+            if command[-3:] == ["mcp", "list", "--json"]:
+                clock[0] += 5
+            elif not runner.calls:
+                clock[0] += 305  # Includes owned process cleanup.
+            return runner(command, **kwargs)
+        with patch("employment_agent.codex_backend.time.monotonic", side_effect=lambda: clock[0]):
+            result, _ = self.run_fixture(runner=timed)
+        self.assertTrue(result["research_incomplete"])
+        self.assertEqual(runner.calls[0]["timeout"], 300)
+        self.assertEqual(runner.calls[1]["timeout"], 290)
+
+    def test_default_runner_preserves_bounded_stdout_after_timeout(self):
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            backend._default_runner([sys.executable, "-c", "import time; print('completed evidence',flush=True); time.sleep(2)"],
+                input="", cwd=None, timeout=0.2)
+        self.assertIn(b"completed evidence", caught.exception.stdout)
+        self.assertIsNone(caught.exception.stderr)
 
     def test_model_override_validated_before_launch(self):
         for invalid in ("--shell", "model; echo secret", "model\n--sandbox danger-full-access", 1, "x" * 121):
@@ -238,6 +578,26 @@ class CodexBackendTests(unittest.TestCase):
         result, _ = self.run_fixture(runner=FixtureRunner(events, report))
         self.assertTrue(result["sources"][0]["opened_by_tool"])
         self.assertEqual(result["findings"][0]["rule_status"], "supported")
+
+    def test_pdf_selected_pages_are_traceable_without_claiming_whole_document(self):
+        events = mcp_events_fixture()
+        data = events[2]["item"]["result"]["structured_content"]
+        data.update(document_type="pdf", text_extraction="pdf_text", pages_read=[7, 8], total_pages=50, full_document=False)
+        result, _ = self.run_fixture(runner=FixtureRunner(events))
+        source = result["sources"][0]
+        self.assertEqual(source["pages_read"], [7, 8])
+        self.assertEqual(source["total_pages"], 50)
+        self.assertEqual(source["document_type"], "pdf")
+        self.assertFalse(source["full_document"])
+
+    def test_pdf_search_snippets_never_count_as_pages_read(self):
+        events = mcp_events_fixture()
+        data = events[2]["item"]["result"]["structured_content"]
+        data.update(document_type="pdf", search_mode=True, truncated=True, pages_read=[], matched_pages=[7], total_pages=50)
+        result, _ = self.run_fixture(runner=FixtureRunner(events))
+        source = result["sources"][0]
+        self.assertFalse(source["opened_by_tool"])
+        self.assertEqual(source["pages_read"], [])
 
     def test_page_links_are_observed_but_not_opened(self):
         events = mcp_events_fixture()

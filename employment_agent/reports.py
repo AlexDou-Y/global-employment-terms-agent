@@ -34,6 +34,8 @@ def render_markdown(report):
     lines = ["# 海外劳动合同与试用期研究报告", ""]
     if report.get("mode") == "demo":
         lines.extend(["> **演示模式：虚构地区，未检索法律，不适用于任何真实国家或员工。**", ""])
+    elif report.get("research_incomplete") is True:
+        lines.extend(["> 本报告依据中断前实际读取的材料恢复整理，未完成核查项仍待确认。", ""])
     lines.extend(["> 本报告为 AI 研究辅助，不是最终法律意见或法务签批。", "",
                   f"- 地区：{_text(report['jurisdiction'])}",
                   f"- 查询国家/地区：{_text(report.get('jurisdiction_country', report.get('query', {}).get('country', '未提供')))}",
@@ -69,7 +71,8 @@ def render_markdown(report):
         if not report.get(key):
             lines.append("- 暂无列明事项。")
         lines.append("")
-    lines.extend(["## 来源与证据状态", ""])
+    lines.extend(["## 来源与证据状态", "",
+                  "发现来源链接不等于已读取内容；已读取内容不等于已取得支持本项结论的条文。搜索摘要不计为已读正文。", ""])
     if not report["sources"]:
         lines.extend(["暂无来源，相关法律规则未核实。", ""])
     for source in report["sources"]:
@@ -77,9 +80,17 @@ def render_markdown(report):
                       f"- 发布机构：{_text(source['publisher'])}",
                       f"- 类型：{SOURCE_LABELS.get(source['source_type'], '其他')}",
                       f"- 检索可追溯：{'是' if source.get('observed_in_search') else '否'}",
-                      f"- 原文访问：{'工具轨迹明确打开原文；不等于人工法律核验' if source.get('opened_by_tool') else '未确认打开原文'}",
+                      f"- 内容读取：{'工具已读取内容' if source.get('opened_by_tool') else '正文读取未确认'}",
                       f"- 条文/段落定位：{_text(source['locator'] or '未知')}",
                       f"- 原文摘录：{_text(source['excerpt'] or '未知')}",
                       f"- 规则生效日期：{_text(source['effective_date'] or '未知')}",
-                      f"- 访问日期：{_text(source['accessed_on'] or '未知')}", ""])
+                      f"- 访问日期：{_text(source['accessed_on'] or '未知')}"])
+        if source.get("document_type") == "pdf":
+            pages = source.get("pages_read")
+            page_numbers = [str(page) for page in pages if type(page) is int and page > 0] if isinstance(pages, list) else []
+            total_pages = source.get("total_pages")
+            lines.extend([f"- PDF 已读页码：{'、'.join(page_numbers) or '未记录'}",
+                          f"- PDF 总页数：{total_pages if type(total_pages) is int and total_pages > 0 else '未知'}",
+                          "- 读取范围：页码仅表示已读取选定页的可提取文本，不代表全文完整读取。"])
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"

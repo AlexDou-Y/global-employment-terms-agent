@@ -23,10 +23,12 @@ class StorageTests(unittest.TestCase):
     def test_saved_report_roundtrip_and_history(self):
         data = report()
         data["provider"] = "codex"
+        data["research_incomplete"] = True
         item = self.store.save(data, "# 报告\n中文")
         self.assertEqual(self.store.get(item["id"])["markdown"], "# 报告\n中文")
         self.assertEqual(self.store.list_reports()[0]["id"], item["id"])
         self.assertEqual(self.store.list_reports()[0]["provider"], "codex")
+        self.assertTrue(self.store.list_reports()[0]["research_incomplete"])
 
     def test_credential_fields_never_persist(self):
         data = report()

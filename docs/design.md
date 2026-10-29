@@ -2,9 +2,9 @@
 
 本项目提供可公开复用的本地网页工具和独立 Agent 指令。用户输入实际工作国家/地区、员工国籍，查询固定期限合同、期限、续签转化、试用期和绩效不符解除五类规则。进一步个案判断按需补充雇主、工作地、合同历史、日期与绩效事实。
 
-## v0.2 架构
+## v0.2.1 架构
 
-- Python 3.10+ 标准库实现本地服务，默认只监听 127.0.0.1；无前端构建或第三方 Python 运行依赖。
+- Python 3.10+ 标准库实现本地服务与核心流程，默认只监听 127.0.0.1；无需前端构建。PDF 文本解析使用必需依赖 `pypdf>=6.14.2,<7`，启动与测试前执行 `python -m pip install -e .`（macOS / Linux 使用 `python3`）。
 - 静态 HTML/CSS/JavaScript 提供中文表单、模拟演示、实时查询、条件追问、来源查看、历史报告与 Markdown/JSON 下载。
 - 默认通过本机 Codex CLI 非交互模式执行联网研究，复用 CLI 已有认证，无需在网页填 API Key。可选直连 OpenAI Responses API 模式继续保留。两种模式均输出同一严格 JSON 结构；每次实时查询都会联网，缓存仅作为研究线索。
 - 程序核查真实搜索调用、来源链、完整的五个主题、输入与日期一致性；模型整理不等于独立法律复核。
@@ -29,9 +29,24 @@
 
 服务使用参数列表与 stdin 启动 `codex exec`，不将国家、国籍或补充事实拼接为 shell 命令。每次调用在临时目录运行，使用 `--sandbox read-only`、`--ephemeral`、`--json`、`--output-schema` 和 `--output-last-message`，启用实时搜索；关闭与研究无关的 shell、apps、plugins、hooks、computer use、browser use、memories 与 multi-agent 能力，保留现有认证和模型服务设置。
 
-调用有总超时和输出上限；只返回安全中文错误，不返回原始认证输出、敏感日志或持久化原始会话。只读执行限制不改变模型服务的数据处理规则。
+本机 Codex 调用有共享的 600 秒总预算和输出上限：研究最多 300 秒；超时但已取得真实正文时，保留已完成工具事件，再以最多 300 秒、禁用工具的整理生成明确标记未完成核查的报告。恢复材料若截断或遗漏，相应来源降级；来源 URL 不能超出实际提供的证据。运行元数据包括 research_incomplete=true、recovery_reason=research_timeout。只返回安全中文错误，不返回原始认证输出、敏感日志或持久化原始会话。超时仍可能发生，不保证获取所有适用规则。只读执行限制不改变模型服务的数据处理规则。
 
 来源证据来自本次 stdout JSONL 中的真实搜索工具事件。最终模型文本中的 URL、搜索次数声明或“已阅读”声明均不能替代工具轨迹。CLI 版本可能只返回有限来源信息；程序按实际事件核对来源和打开记录，缺少证据时降级或拒绝结果，不补造已核验标记。两种运行方式共享五主题、场景适用、日期、来源和报告校验。
+
+## 公开 PDF 与按页证据
+
+本机 Codex 的受控联网工具 `read_web_page` 支持公开 HTML、纯文本及不超过 20 MB、最多 1,500 页的未加密 PDF。HTML 链接提取包括 `iframe`、`embed`、`object` 的嵌入地址；发现这些地址仅代表可继续访问的线索。PDF 下载支持 HTTP Range 分段及范围、长度校验，受站点响应与网络条件限制。PDF 解析在有超时限制的子进程中运行，不执行 PDF 中的脚本、动作或附件。
+
+| 读取参数或结果 | 约定 |
+| --- | --- |
+| `url` | 公开来源地址；无需登录或内网权限 |
+| `page_start`、`page_end` | 从 1 开始的 PDF 实际页序；默认前 5 页，显式范围最多 12 页，可能不同于文件印刷页码 |
+| `search` | 关键词定位，可用 `|` 分隔替代词；命中片段只用于定位，随后须按页码再次读取 |
+| `text` | 单次正文输出最多 28,000 字符，超限明确标记截断 |
+| `truncated` | 为 `false` 只表示本次选定页的可提取文本未截断，不代表读取整份文档 |
+| `full_document` | 单次读取覆盖全部页且未截断时才为 `true`，不表示法规现行效力或条文解释已核实 |
+
+关键词检索受时间、文本量与命中数量限制，返回已搜索范围及完成状态；不把未命中解释为不存在相关规定。搜索片段不计入正文读取证据或 `pages_read`。扫描件无法提取文字时提示需要 OCR，当前不自动 OCR；部分页不可读、解析失败或资源超限均保留缺口，不推定已完整读取。
 
 ## 稳定接口
 
@@ -56,7 +71,11 @@ source_type: official | professional | vendor | other
 
 jurisdiction_country、jurisdiction_subdivision 必须分别精确等于输入 country、subdivision，否则拒绝报告，不能把错误辖区的答案写入规则卡。jurisdiction 是便于阅读的展示名称。
 
-研究模块增加非模型生成的运行信息：mode（live/demo）、provider（实时模式为 codex/openai）、generated_at、model、query、verification_notes、web_search_count；每个来源附 observed_in_search 与 opened_by_tool（仅表示工具轨迹明确出现 open_page）。provider 属于服务端运行元数据，不要求模型生成；网页和 Markdown 均展示运行方式。程序不能把“在搜索来源列表中出现”解释成“已读取原文”。无法确认原文读取的来源要降级对应结论并说明。界面展示只读的原始查询条件，避免将历史结果误用于当前表单里的新场景。
+研究模块增加非模型生成的运行信息：mode（live/demo）、provider（实时模式为 codex/openai）、generated_at、model、query、verification_notes、web_search_count；每个来源附 observed_in_search 与 opened_by_tool。后者仅表示可确认的工具读取轨迹，本机受控读取还要求返回非空且未截断的内容；PDF 读取仅限本次选定页，搜索定位片段不算正文。provider 属于服务端运行元数据，不要求模型生成；网页和 Markdown 均展示运行方式。
+
+本机工具轨迹可为来源附加以下可选元数据，旧报告缺少这些字段时仍可读取：`document_type`（pdf/html/text）、`text_extraction`（pdf_text/html/plain）、`pages_read`（已确认读取的实际页序数组）、`total_pages`（PDF 总页数）、`full_document`（是否有覆盖全文且未截断的读取记录）。页码取自工具结果，不由模型自行声明。界面与导出保留条文定位和摘录，并显示可确认的 PDF 页码与总页数。
+
+界面使用“工具已读取内容 / 正文读取未确认”及“官方（AI 分类）”标签。发现来源链接不等于读取内容，读取内容不等于取得支持本项结论的条文；法规详情页可能只有元数据，选定 PDF 页不代表全文。缺少正文证据时降级对应结论并说明。界面展示只读的原始查询条件，避免将历史结果误用于当前表单里的新场景。
 
 HTTP 接口：
 
@@ -75,6 +94,8 @@ HTTP 接口：
 ## 验收
 
 使用固定模拟 API 响应及 Codex 进程/JSONL 事件检验：伪造来源、没有实际搜索、缺失主题、非官方或未打开来源、一般规则被写成个案结论、过期日期、拒答/截断、上游超时。另检验 CLI 命令参数、输入隔离、认证脱敏、输出上限、错误事件及无凭据回传。HTTP 回归覆盖默认与显式 provider、本机模式无网页 Key 调用、直连 API 模式 Key 要求、未知 provider 拒绝和失败不自动切换。
+
+PDF 回归覆盖嵌入地址发现、默认与指定页范围、关键词片段与正文读取区分、截断、扫描件、损坏或加密文件、下载分段校验及来源页码导出。先执行 `python -m pip install -e .`，再执行 `python -m unittest discover -s tests -v`；CI 模板采用同样顺序。
 
 离线演示、HTTP 请求校验、凭据不写入报告、历史下载和规则复用应独立测试。真实 Codex 调用、直连 API 调用和法务解释质量须分别披露验证范围；安装/认证探测或离线测试通过均不能替代真实调用验证。
 

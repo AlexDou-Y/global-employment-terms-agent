@@ -31,7 +31,7 @@ def read_env_file(path):
             continue
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
-        if key not in {"OPENAI_API_KEY", "OPENAI_MODEL"}:
+        if key not in {"OPENAI_API_KEY", "OPENAI_MODEL", "EMPLOYMENT_AGENT_PROVIDER", "CODEX_MODEL"}:
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
@@ -40,7 +40,10 @@ def read_env_file(path):
 
 
 def create_server(*, port=8765, data_dir="data", api_key="", model=DEFAULT_MODEL,
-                  research_fn=None, render_fn=None, demo_fn=None):
+                  default_provider="codex", codex_model="", research_fn=None,
+                  codex_fn=None, codex_status_fn=None, render_fn=None, demo_fn=None):
+    if default_provider not in {"codex", "openai"}:
+        raise ValueError("默认运行方式必须是 codex 或 openai。")
     store = ReportStore(data_dir)
     session_token = secrets.token_urlsafe(32)
     research_slots = threading.BoundedSemaphore(2)
@@ -104,7 +107,15 @@ def create_server(*, port=8765, data_dir="data", api_key="", model=DEFAULT_MODEL
                 return
             path = urlsplit(self.path).path
             if path == "/api/config":
+                from .codex_backend import get_codex_status
+                try:
+                    codex_status = (codex_status_fn or get_codex_status)()
+                except Exception:
+                    codex_status = {"installed": False, "auth_status": "unknown", "auth_mode": "unknown",
+                                    "version": "", "message": "暂时无法检查本机 Codex，请确认安装后刷新页面。"}
                 return self._send(200, {"default_model": model, "api_key_configured": bool(api_key),
+                                        "default_provider": default_provider, "codex_default_model": codex_model,
+                                        "codex": codex_status,
                                         "session_token": session_token})
             if path == "/api/reports":
                 return self._send(200, {"reports": store.list_reports()})
@@ -173,17 +184,30 @@ def create_server(*, port=8765, data_dir="data", api_key="", model=DEFAULT_MODEL
                     result = (demo_fn or make_demo_report)()
                 else:
                     query = normalize_query(body)
-                    request_key = body.get("api_key", "")
-                    selected_model = body.get("model", "") or model
-                    if not isinstance(request_key, str) or len(request_key) > 1024:
-                        raise ValueError("API Key 格式无效。")
-                    if not isinstance(selected_model, str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,120}", selected_model):
+                    provider = body.get("provider", default_provider)
+                    if not isinstance(provider, str) or provider not in {"codex", "openai"}:
+                        raise ValueError("运行方式必须是 codex 或 openai。")
+                    selected_model = body.get("model", "")
+                    if not isinstance(selected_model, str):
                         raise ValueError("模型名称格式无效。")
-                    request_key = request_key.strip() or api_key
-                    if not request_key:
-                        return self._send(400, {"error": "请在运行设置中填写 API Key，或先查看无需密钥的演示。"})
-                    result = (research_fn or run_research)(query, api_key=request_key, model=selected_model,
-                                                           prior_rules=store.get_prior_rules(query))
+                    selected_model = selected_model.strip() or (codex_model if provider == "codex" else model)
+                    if selected_model and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,119}", selected_model):
+                        raise ValueError("模型名称格式无效。")
+                    prior_rules = store.get_prior_rules(query)
+                    if provider == "codex":
+                        from .codex_backend import run_codex_research
+                        result = (codex_fn or run_codex_research)(query, model=selected_model or None,
+                                                                prior_rules=prior_rules)
+                    else:
+                        request_key = body.get("api_key", "")
+                        if not isinstance(request_key, str) or len(request_key) > 1024:
+                            raise ValueError("API Key 格式无效。")
+                        request_key = request_key.strip() or api_key
+                        if not request_key:
+                            return self._send(400, {"error": "API 模式需要 API Key；也可切换为本机 Codex 模式。"})
+                        result = (research_fn or run_research)(query, api_key=request_key, model=selected_model,
+                                                               prior_rules=prior_rules)
+                    result["provider"] = provider
                 item = store.save(result, renderer(result))
                 return self._send(200, item)
             except ValueError as exc:
@@ -212,9 +236,12 @@ def main(argv=None):
     settings = read_env_file(Path.cwd() / ".env")
     key = os.environ.get("OPENAI_API_KEY", settings.get("OPENAI_API_KEY", "")).strip()
     model = os.environ.get("OPENAI_MODEL", settings.get("OPENAI_MODEL", DEFAULT_MODEL)).strip() or DEFAULT_MODEL
+    provider = os.environ.get("EMPLOYMENT_AGENT_PROVIDER", settings.get("EMPLOYMENT_AGENT_PROVIDER", "codex")).strip()
+    codex_model = os.environ.get("CODEX_MODEL", settings.get("CODEX_MODEL", "")).strip()
     try:
-        server = create_server(port=args.port, data_dir=args.data_dir, api_key=key, model=model)
-    except OSError as exc:
+        server = create_server(port=args.port, data_dir=args.data_dir, api_key=key, model=model,
+                               default_provider=provider, codex_model=codex_model)
+    except (OSError, ValueError) as exc:
         parser.exit(1, f"启动失败：{exc}\n可通过 --port 8766 选择其他端口。\n")
     print(f"Open http://127.0.0.1:{server.server_port}")
     print("Press Ctrl+C to stop. API keys are never written to reports.")
@@ -223,6 +250,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
+        from .codex_backend import cancel_active_runs
+        cancel_active_runs()
         server.server_close()
 
 

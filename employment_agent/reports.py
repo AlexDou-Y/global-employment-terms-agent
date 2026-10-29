@@ -40,6 +40,7 @@ def render_markdown(report):
                   f"- 查询州/省：{_text(report.get('jurisdiction_subdivision') or '未提供')}",
                   f"- 规则基准日：{_text(report['as_of_date'])}",
                   f"- 生成时间：{_text(report.get('generated_at', ''))}",
+                  f"- 运行方式：{_text({'codex': '本机 Codex', 'openai': 'OpenAI API'}.get(report.get('provider'), '演示' if report.get('mode') == 'demo' else '未记录'))}",
                   f"- 模型：{_text(report.get('model', ''))}",
                   f"- 已完成联网搜索：{_text(report.get('web_search_count', 0))} 次", "",
                   "## 范围与结论", "", _text(report["scope"]), "", _text(report["summary"]), ""])

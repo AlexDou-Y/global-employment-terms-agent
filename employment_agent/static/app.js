@@ -2,7 +2,8 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { config: null, busy: false, timer: null, startedAt: 0, activeReport: null };
+  const state = { config: null, busy: false, timer: null, startedAt: 0, activeReport: null, provider: "codex", providerChosen: false, models: { codex: "", openai: "" }, modelEdited: { codex: false, openai: false } };
+  const providerLabels = { codex: "本机 Codex", openai: "OpenAI API" };
   const topicNames = {
     fixed_term_allowed: "固定期限合同是否允许",
     fixed_term_duration: "合同期限限制",
@@ -75,22 +76,70 @@
       const config = await request("/api/config");
       if (!config || typeof config.session_token !== "string" || !config.session_token) throw new Error("未能取得服务会话，请重新启动本地服务后刷新页面。");
       state.config = config;
-      if (!$("model").value) $("model").value = text(config.default_model);
-      $("model").placeholder = "填写模型名称";
-      $("connection-badge").textContent = config.api_key_configured ? "密钥已配置" : "待填写密钥";
-      $("connection-badge").className = "connection-badge " + (config.api_key_configured ? "ready" : "missing");
+      if (!state.providerChosen) state.provider = config.default_provider === "openai" ? "openai" : "codex";
+      if (!state.modelEdited.codex) state.models.codex = text(config.codex_default_model);
+      if (!state.modelEdited.openai) state.models.openai = text(config.default_model);
+      $("provider").value = state.provider;
+      $("model").value = state.models[state.provider];
       $("api-key").placeholder = config.api_key_configured ? "已使用服务环境密钥，可按需覆盖" : "sk-…";
       $("api-key-help").textContent = config.api_key_configured ? "服务环境已配置密钥；此处可留空。填写的密钥仅用于本次请求。" : "密钥仅用于本次请求，不保存到浏览器或报告。";
+      updateRuntime();
       $("config-notice").hidden = true;
       return config;
     } catch (error) {
       state.config = null;
+      updateRuntime();
       $("connection-badge").textContent = "连接未就绪";
       $("connection-badge").className = "connection-badge missing";
+      $("runtime-status").textContent = "暂未取得运行环境状态。请确认本地服务正常运行后刷新页面。";
+      $("runtime-status").className = "field-help runtime-status missing";
       $("config-notice").textContent = error.message;
       $("config-notice").hidden = false;
       throw error;
     }
+  }
+
+  function updateRuntime() {
+    const codexMode = state.provider === "codex";
+    const config = state.config;
+    $("api-key-field").hidden = codexMode;
+    $("api-key").disabled = codexMode;
+    $("model-optional").hidden = !codexMode;
+    $("model").placeholder = codexMode ? "留空，沿用本机 Codex 设置" : "填写模型名称";
+    $("model-help").textContent = codexMode ? "可留空沿用本机设置，或填写当前 Codex 可用的模型名称。" : "请使用支持 Responses API 联网搜索的模型。";
+    $("request-note").textContent = codexMode ? "联网核验会将填写的信息发送至模型服务商。复用本机 Codex 认证，受对应账号或服务用量限制。" : "联网核验会将填写的信息发送至模型服务商，API 用量由服务商计费。";
+    let badge = "读取中";
+    let status = codexMode ? "正在检查本机 Codex 状态…" : "正在读取 API 连接设置…";
+    let tone = "";
+    if (config && codexMode) {
+      const codex = config.codex || {};
+      if (codex.installed === false) {
+        badge = "未检测到安装";
+        status = "未检测到本机 Codex。请先在终端运行 npm install -g @openai/codex 安装，再运行 codex login 登录；完成后重启本地服务并刷新页面。";
+        tone = "missing";
+      } else if (codex.auth_status === "not_configured") {
+        badge = "待登录配置";
+        status = "已检测到本机 Codex，尚未检测到认证配置。请本人在终端运行 codex login，完成后刷新页面。";
+        tone = "missing";
+      } else if (codex.installed === true && codex.auth_status === "configured") {
+        badge = "已检测到配置";
+        const auth = codex.auth_mode === "chatgpt" ? "ChatGPT 登录" : codex.auth_mode === "api_key" ? "API Key 认证" : "认证";
+        status = "已检测到本机 Codex 的" + auth + "配置，无需在网页填写密钥。实际权限与用量可用性以本次调用结果为准。";
+        tone = "ready";
+      } else {
+        badge = "状态待确认";
+        status = "暂未确认本机 Codex 认证状态。可在终端运行 codex login status 检查；如需登录，请运行 codex login，完成后刷新页面。";
+        tone = "missing";
+      }
+    } else if (config) {
+      badge = config.api_key_configured ? "密钥已配置" : "待填写密钥";
+      status = config.api_key_configured ? "已检测到服务环境密钥，可直接发起 API 请求；实际可用性以调用结果为准。" : "请展开“模型与连接设置”填写本次请求使用的 API Key。";
+      tone = config.api_key_configured ? "ready" : "missing";
+    }
+    $("connection-badge").textContent = badge;
+    $("connection-badge").className = "connection-badge " + tone;
+    $("runtime-status").textContent = status;
+    $("runtime-status").className = "field-help runtime-status " + tone;
   }
 
   function showError(message) {
@@ -104,6 +153,8 @@
     $("research-button").disabled = busy;
     $("demo-button").disabled = busy;
     $("history-refresh").disabled = busy;
+    $("provider").disabled = busy;
+    $("model").disabled = busy;
     $("research-form").setAttribute("aria-busy", String(busy));
     $("request-status").hidden = !busy;
     $("report-panel").classList.toggle("busy-report", busy);
@@ -111,7 +162,7 @@
     state.timer = null;
     if (busy) {
       $("request-error").hidden = true;
-      $("request-status-title").textContent = mode === "demo" ? "正在载入演示报告" : mode === "history" ? "正在读取历史报告" : "正在联网核验";
+      $("request-status-title").textContent = mode === "demo" ? "正在载入演示报告" : mode === "history" ? "正在读取历史报告" : "正在通过" + providerLabels[state.provider] + "联网核验";
       $("request-status-message").textContent = mode === "live" ? "正在检索来源并整理报告，可能需要数分钟。请保持页面打开。" : "正在从本地服务读取报告。";
       state.startedAt = Date.now();
       $("elapsed-time").textContent = "";
@@ -139,14 +190,18 @@
       const config = state.config || await loadConfig();
       const payload = mode === "demo" ? {} : collectQuery();
       if (mode === "live") {
-        const key = $("api-key").value.trim();
-        if (!key && !config.api_key_configured) {
-          $("runtime-settings").open = true;
-          $("api-key").focus();
-          throw new Error("请在“模型与连接设置”中填写 API Key，或先查看无需密钥的演示报告。");
+        payload.provider = state.provider;
+        payload.model = $("model").value.trim();
+        if (state.provider === "openai") {
+          const key = $("api-key").value.trim();
+          if (!key && !config.api_key_configured) {
+            $("runtime-settings").open = true;
+            $("api-key").focus();
+            throw new Error("OpenAI API 模式需要 API Key。请在“模型与连接设置”中填写，或选择已配置的本机 Codex。演示报告无需密钥。");
+          }
+          payload.api_key = key;
+          payload.model = payload.model || text(config.default_model);
         }
-        payload.api_key = key;
-        payload.model = $("model").value.trim() || text(config.default_model);
         $("api-key").value = "";
       }
       const data = await request(mode === "demo" ? "/api/demo" : "/api/research", {
@@ -277,6 +332,7 @@
     header.append(topline, element("h2", "", text(report.jurisdiction, "用工规则研究")), element("p", "report-summary", report.summary));
     const meta = element("div", "report-meta");
     meta.append(element("span", "", "规则日期 " + text(report.as_of_date, "未提供")), element("span", "", "生成于 " + dateLabel(report.generated_at)));
+    if (!demo && Object.hasOwn(providerLabels, report.provider)) meta.append(element("span", "", "运行方式 " + providerLabels[report.provider]));
     if (report.scope) meta.append(element("span", "", report.scope));
     header.append(meta);
     content.append(header, renderQueryContext(report));
@@ -350,7 +406,8 @@
         const button = element("button", "history-item"); button.type = "button";
         button.append(element("strong", "", text(report.jurisdiction, "未命名报告")), element("p", "", text(report.summary, "点击查看完整报告")));
         const metadata = element("small", "", dateLabel(report.generated_at));
-        metadata.append(element("span", "history-mode" + (report.mode === "demo" ? " demo" : ""), report.mode === "demo" ? "虚构演示" : "联网研究"));
+        const modeLabel = report.mode === "demo" ? "虚构演示" : Object.hasOwn(providerLabels, report.provider) ? "联网研究 · " + providerLabels[report.provider] : "联网研究";
+        metadata.append(element("span", "history-mode" + (report.mode === "demo" ? " demo" : ""), modeLabel));
         button.append(metadata);
         button.addEventListener("click", () => openHistory(report.id));
         fragment.append(button);
@@ -365,6 +422,18 @@
 
   const today = new Date();
   $("as-of-date").value = [today.getFullYear(), String(today.getMonth() + 1).padStart(2, "0"), String(today.getDate()).padStart(2, "0")].join("-");
+  $("provider").addEventListener("change", () => {
+    state.models[state.provider] = $("model").value;
+    state.provider = $("provider").value === "openai" ? "openai" : "codex";
+    state.providerChosen = true;
+    $("model").value = state.models[state.provider];
+    if (state.provider === "codex") $("api-key").value = "";
+    updateRuntime();
+  });
+  $("model").addEventListener("input", () => {
+    state.models[state.provider] = $("model").value;
+    state.modelEdited[state.provider] = true;
+  });
   $("research-form").addEventListener("submit", (event) => { event.preventDefault(); runResearch("live"); });
   $("research-form").addEventListener("invalid", (event) => { const details = event.target.closest("details"); if (details) details.open = true; }, true);
   $("demo-button").addEventListener("click", () => runResearch("demo"));
